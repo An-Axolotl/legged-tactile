@@ -23,7 +23,9 @@ LABEL = {"baseline": "proprioception only", "fsr": "+ FSR on/off", "resistance":
 # validated categorical order (dataviz reference palette, light mode); baseline is neutral ink
 COLOR = {"baseline": "#52514e", "fsr": "#2a78d6", "resistance": "#eb6834", "slip": "#1baf7a",
          "vibro": "#eda100", "all": "#e87ba4"}
-CONDS = {"flat": "", "rough": "_rough", "dead": "_dead", "noisy": "_noisy"}
+CONDS = {"flat": "", "rough": "_rough", "dead": "_dead", "noisy": "_noisy",
+         "mixed": "_mixed", "mixed_dead": "_mixed_dead", "mixed_noisy": "_mixed_noisy"}
+FAULT_BASE = {"dead": "flat", "noisy": "flat", "mixed_dead": "mixed", "mixed_noisy": "mixed"}
 METRICS = [("err", "velocity-tracking error [m/s]", False), ("fell", "fall rate", False),
            ("dist", "distance in 20 s [m]", True), ("slip", "foot slip while loaded [m/s]", False)]
 rng = np.random.default_rng(0)
@@ -39,9 +41,9 @@ for v in ORDER:
             sid = np.array(pe["surface"])
             R[v, c] = {s: {k: np.array(pe[k])[sid == i] for k in ("err", "fell", "dist", "slip")}
                        for i, s in enumerate(SURF)}
-for c in ("dead", "noisy"):  # the baseline has no tactile sensors: faults do not change it
-    if ("baseline", "flat") in R:
-        R["baseline", c] = R["baseline", "flat"]
+for c, base in FAULT_BASE.items():  # the baseline has no tactile sensors: faults do not change it
+    if ("baseline", base) in R:
+        R["baseline", c] = R["baseline", base]
 print("loaded", sorted(R))
 
 
@@ -116,7 +118,7 @@ try:
                          "axes.spines.right": False, "figure.facecolor": "#fcfcfb", "axes.facecolor": "#fcfcfb"})
 
     # 1. velocity error vs friction, flat and rough (small multiples, one axis each)
-    conds = [c for c in ("flat", "rough") if ("baseline", c) in R]
+    conds = [c for c in ("flat", "mixed") if ("baseline", c) in R]
     fig, axes = plt.subplots(1, len(conds), figsize=(5.2 * len(conds), 3.6), dpi=130, sharey=True, squeeze=False)
     for ax, c in zip(axes[0], conds):
         for v in ORDER:
@@ -126,7 +128,7 @@ try:
             ax.plot(range(len(SURF)), y, color=COLOR[v], lw=2 if v in ("baseline", "all") else 1.4,
                     marker="o", ms=4, ls="--" if v == "baseline" else "-", label=LABEL[v])
         ax.set_xticks(range(len(SURF)), [f"{s.replace('_', chr(10))}\nμ={MU[s]}" for s in SURF], fontsize=7)
-        ax.set_title(f"{c} ground", fontsize=10, color="#0b0b0b", loc="left")
+        ax.set_title({"flat": "flat ground", "mixed": "mixed terrain (stairs, rocky steps, rough, slopes, flat)"}[c], fontsize=10, color="#0b0b0b", loc="left")
         ax.grid(axis="y", color="#e6e5e0", lw=0.6)
     axes[0][0].set_ylabel("velocity-tracking error [m/s] (lower is better)")
     h, l = axes[0][0].get_legend_handles_labels()
@@ -136,7 +138,7 @@ try:
     plt.close(fig)
 
     # 2. difference to baseline, heat map with CI significance (flat)
-    for c in [c for c in ("flat", "rough") if ("all", c) in R]:
+    for c in [c for c in ("flat", "rough", "mixed") if ("all", c) in R]:
         vs = [v for v in ORDER[1:] if (v, c) in R]
         D = np.array([[summary[f"{v}|{c}|{s}"]["err_diff"][0] for s in SURF + ["mean"]] for v in vs])
         Sg = [[summary[f"{v}|{c}|{s}"]["err_diff"][3] for s in SURF + ["mean"]] for v in vs]
@@ -165,27 +167,29 @@ try:
         plt.close(fig)
 
     # 3. sensor faults: mean error over all surfaces, nominal vs noisy vs dead
-    vs = [v for v in ORDER[1:] if (v, "dead") in R]
-    if vs:
-        fig, ax = plt.subplots(figsize=(7.5, 3.2), dpi=130)
-        w = 0.26
-        styles = [("flat", "sensors OK", 1.0), ("noisy", "noisy sensors", 0.6), ("dead", "dead sensors", 0.3)]
-        for k, (c, name, alpha) in enumerate(styles):
-            ys = [summary[f"{v}|{c}|mean"]["err"] for v in vs]
-            ax.bar(np.arange(len(vs)) + (k - 1) * w, ys, w - 0.03, color=[COLOR[v] for v in vs], alpha=alpha,
-                   label=name, edgecolor="#fcfcfb", linewidth=1)
-        b = summary["baseline|flat|mean"]["err"]
-        ax.axhline(b, color=COLOR["baseline"], ls="--", lw=1.5)
-        ax.text(len(vs) - 0.5, b, " proprioception only", va="bottom", ha="right", fontsize=7.5, color="#52514e")
-        ax.set_xticks(range(len(vs)), [LABEL[v] for v in vs], fontsize=8)
-        ax.set_ylabel("velocity error, all surfaces [m/s]")
-        leg = ax.legend(fontsize=7, frameon=False, loc="upper left")
-        for h in leg.legend_handles:
-            h.set_color("#52514e")
-        ax.grid(axis="y", color="#e6e5e0", lw=0.6)
-        fig.tight_layout()
-        fig.savefig(os.path.join(ROOT, "media/fig_sensor_faults.png"))
-        plt.close(fig)
+    for fc in ("", "mixed"):
+      pre = f"{fc}_" if fc else ""
+      vs = [v for v in ORDER[1:] if (v, pre + "dead") in R]
+      if vs:
+          fig, ax = plt.subplots(figsize=(7.5, 3.2), dpi=130)
+          w = 0.26
+          styles = [(fc or "flat", "sensors OK", 1.0), (pre + "noisy", "noisy sensors", 0.6), (pre + "dead", "dead sensors", 0.3)]
+          for k, (c, name, alpha) in enumerate(styles):
+              ys = [summary[f"{v}|{c}|mean"]["err"] for v in vs]
+              ax.bar(np.arange(len(vs)) + (k - 1) * w, ys, w - 0.03, color=[COLOR[v] for v in vs], alpha=alpha,
+                     label=name, edgecolor="#fcfcfb", linewidth=1)
+          b = summary[f"baseline|{fc or 'flat'}|mean"]["err"]
+          ax.axhline(b, color=COLOR["baseline"], ls="--", lw=1.5)
+          ax.text(len(vs) - 0.5, b, " proprioception only", va="bottom", ha="right", fontsize=7.5, color="#52514e")
+          ax.set_xticks(range(len(vs)), [LABEL[v] for v in vs], fontsize=8)
+          ax.set_ylabel("velocity error, all surfaces [m/s]")
+          leg = ax.legend(fontsize=7, frameon=False, loc="upper left")
+          for h in leg.legend_handles:
+              h.set_color("#52514e")
+          ax.grid(axis="y", color="#e6e5e0", lw=0.6)
+          fig.tight_layout()
+          fig.savefig(os.path.join(ROOT, f"media/fig_sensor_faults{'_' + fc if fc else ''}.png"))
+          plt.close(fig)
 except ImportError:
     print("matplotlib missing: no charts")
 
@@ -235,18 +239,28 @@ def save_row(path, clips):
 
 
 for s in SURF:
+    save_row(os.path.join(ROOT, f"media/gifs/mixed_{s}.gif"),
+             [frames(f"baseline_{s}_mixed_wide", f"proprioception only | {s.replace('_', ' ')} μ={MU[s]}", size=(480, 270)),
+              frames(f"all_{s}_mixed_wide", f"+ all tactile | {s.replace('_', ' ')} μ={MU[s]}", size=(480, 270))])
+for s in ("regular", "ice"):
+    save_row(os.path.join(ROOT, f"media/gifs/mixed_dead_{s}.gif"),
+             [frames(f"baseline_{s}_mixed_wide", f"proprioception only | {s}", size=(400, 225)),
+              frames(f"all_{s}_mixed_wide", f"all tactile, sensors OK | {s}", size=(400, 225)),
+              frames(f"all_{s}_mixed_wide_dead", f"all tactile, sensors DEAD | {s}", size=(400, 225))])
+if os.environ.get("FLAT_GIFS"):
+  for s in SURF:
     save_row(os.path.join(ROOT, f"media/gifs/compare_{s}.gif"),
              [frames(f"baseline_{s}", f"proprioception only | {s} μ={MU[s]}"),
               frames(f"all_{s}", f"+ all tactile | {s} μ={MU[s]}")])
-for s in ("ice", "glue"):
-    save_row(os.path.join(ROOT, f"media/gifs/compare_{s}_rough.gif"),
-             [frames(f"baseline_{s}_rough", f"proprioception only | rough {s}"),
-              frames(f"all_{s}_rough", f"+ all tactile | rough {s}")])
-for s in ("extreme_ice", "ice", "glue"):
-    save_row(os.path.join(ROOT, f"media/gifs/sensors_{s}.gif"),
-             [frames(f"{v}_{s}", f"{LABEL[v]} | {s}", size=(270, 170)) for v in ("fsr", "resistance", "slip", "vibro")])
-for s in ("regular", "ice"):
-    save_row(os.path.join(ROOT, f"media/gifs/dead_{s}.gif"),
-             [frames(f"baseline_{s}", f"proprioception only | {s}"),
-              frames(f"all_{s}", f"all tactile, sensors OK | {s}"),
-              frames(f"all_{s}_dead", f"all tactile, sensors DEAD | {s}")])
+  for s in ("ice", "glue"):
+      save_row(os.path.join(ROOT, f"media/gifs/compare_{s}_rough.gif"),
+               [frames(f"baseline_{s}_rough", f"proprioception only | rough {s}"),
+                frames(f"all_{s}_rough", f"+ all tactile | rough {s}")])
+  for s in ("extreme_ice", "ice", "glue"):
+      save_row(os.path.join(ROOT, f"media/gifs/sensors_{s}.gif"),
+               [frames(f"{v}_{s}", f"{LABEL[v]} | {s}", size=(270, 170)) for v in ("fsr", "resistance", "slip", "vibro")])
+  for s in ("regular", "ice"):
+      save_row(os.path.join(ROOT, f"media/gifs/dead_{s}.gif"),
+               [frames(f"baseline_{s}", f"proprioception only | {s}"),
+                frames(f"all_{s}", f"all tactile, sensors OK | {s}"),
+                frames(f"all_{s}_dead", f"all tactile, sensors DEAD | {s}")])

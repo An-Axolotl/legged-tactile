@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# All evaluation runs behind the README (≈ 1.5 h on one RTX 4090).
+# All evaluation runs behind the README (≈ 3 h on one RTX 4090).
 #   metrics: 6 policies x {flat, rough, flat + dead sensors, flat + noisy sensors}, 128 robots per surface
 #   videos : baseline vs all-sensors on every surface (flat), on ice/glue (rough), and all-sensors with dead sensors
 set -u
@@ -24,6 +24,7 @@ for v in fsr resistance slip vibro; do
   $V --variant $v --surfaces extreme_ice,ice,glue > logs/video_$v.log 2>&1; echo "video $v $?"
 done
 $V --variant all --fault dead --surfaces regular,ice > logs/video_all_dead.log 2>&1; echo "video dead $?"
+PY=$PY bash scripts/eval_mixed.sh   # mixed terrain + wide videos (the README's main results)
 $PY scripts/make_media.py > logs/make_media.log 2>&1; echo "media $?"
 $PY scripts/write_readme.py; echo "readme $?"
 echo EVAL DONE

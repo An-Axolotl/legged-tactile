@@ -24,7 +24,8 @@ ap.add_argument("--video", action="store_true")
 ap.add_argument("--video_seconds", type=float, default=8.0)
 ap.add_argument("--surfaces", default="")
 ap.add_argument("--checkpoint", default="")
-ap.add_argument("--terrain", choices=["flat", "rough"], default="flat")
+ap.add_argument("--terrain", choices=["flat", "rough", "mixed"], default="flat")
+ap.add_argument("--wide", type=int, default=0, help="video: N robots per run on one surface, fixed wide camera")
 ap.add_argument("--fault", choices=["none", "dead", "noisy"], default="none")
 AppLauncher.add_app_launcher_args(ap)
 args = ap.parse_args()
@@ -36,6 +37,7 @@ print = functools.partial(print, flush=True)  # noqa: A001  (Isaac Sim exits bef
 import gymnasium as gym  # noqa: E402
 import imageio  # noqa: E402
 import torch  # noqa: E402
+import isaaclab.terrains as tg  # noqa: E402
 from isaaclab.terrains import MeshPlaneTerrainCfg  # noqa: E402
 from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper  # noqa: E402
 from isaaclab_tasks.utils import get_checkpoint_path, load_cfg_from_registry  # noqa: E402
@@ -51,16 +53,35 @@ from tactile_loco.sensors import SURFACES  # noqa: E402
 task = f"Tactile-A1-{args.variant}-v0"
 surfaces = tuple(args.surfaces.split(",")) if args.surfaces else tuple(SURFACES)
 cfg = E.make(E.VARIANTS[args.variant], surfaces)()
-n_per = 1 if args.video else args.envs_per_surface
+n_per = (args.wide or 1) if args.video else args.envs_per_surface
 cfg.scene.num_envs = n_per * len(surfaces)
 cfg.seed = 0
 if args.terrain == "flat":
     # flat tiles from the same terrain generator as training (same collider prim the friction sensor filters on)
     gen = cfg.scene.terrain.terrain_generator.replace(
         sub_terrains={"flat": MeshPlaneTerrainCfg(proportion=1.0)}, curriculum=False, num_rows=4, num_cols=4)
-else:
+elif args.terrain == "rough":
     # the training terrain mix (slopes, stairs, boxes, noise) at uniformly random difficulty
     gen = cfg.scene.terrain.terrain_generator.replace(curriculum=False)
+else:
+    # mixed field like the original project's videos: flat ground, stair pyramids (up and down), rocky steps
+    # (random blocks), rough ground and slopes, at moderate difficulty; fixed layout (seed 0)
+    gen = cfg.scene.terrain.terrain_generator.replace(
+        curriculum=False, seed=0, difficulty_range=(0.2, 0.7),
+        num_rows=3 if args.wide else 8, num_cols=3 if args.wide else 8,
+        sub_terrains={
+            "flat": MeshPlaneTerrainCfg(proportion=0.2),
+            "stairs_up": tg.MeshPyramidStairsTerrainCfg(proportion=0.2, step_height_range=(0.05, 0.18), step_width=0.3,
+                                                        platform_width=3.0, border_width=1.0),
+            "stairs_down": tg.MeshInvertedPyramidStairsTerrainCfg(proportion=0.15, step_height_range=(0.05, 0.18),
+                                                                  step_width=0.3, platform_width=3.0, border_width=1.0),
+            "rocky_steps": tg.MeshRandomGridTerrainCfg(proportion=0.2, grid_width=0.45, grid_height_range=(0.03, 0.15),
+                                                       platform_width=2.0),
+            "rough": tg.HfRandomUniformTerrainCfg(proportion=0.15, noise_range=(0.02, 0.08), noise_step=0.02,
+                                                  border_width=0.25),
+            "slope": tg.HfPyramidSlopedTerrainCfg(proportion=0.1, slope_range=(0.0, 0.3), platform_width=2.0,
+                                                  border_width=0.25),
+        })
 cfg.scene.terrain.terrain_generator = gen
 cfg.scene.terrain.max_init_terrain_level = None
 S_mod.FAULT["mode"] = args.fault
@@ -70,7 +91,7 @@ cfg.events.randomize_push_robot = None
 cfg.terminations.terrain_out_of_bounds = None  # the 20 s walk may leave its tile; no mid-rollout resets
 cfg.events.randomize_apply_external_force_torque = None
 cfg.events.randomize_reset_base.params["pose_range"] = {"x": (0, 0), "y": (0, 0), "yaw": (0, 0)}
-if args.terrain == "rough":
+if args.terrain != "flat":
     cfg.events.randomize_reset_base.params["pose_range"] = {"x": (-0.5, 0.5), "y": (-0.5, 0.5), "yaw": (-3.14, 3.14)}
 cfg.events.randomize_reset_base.params["velocity_range"] = {}
 cmd = cfg.commands.base_velocity
@@ -80,12 +101,17 @@ cmd.resampling_time_range = (1e6, 1e6)
 cmd.ranges.lin_vel_x = (0.8, 0.8)
 cmd.ranges.lin_vel_y = (0.0, 0.0)
 cmd.ranges.ang_vel_z = (0.0, 0.0)
-if args.video:
+if args.video and args.wide:
+    cfg.viewer.origin_type = "world"
+    cfg.viewer.eye = (-12.5, -9.5, 7.5)
+    cfg.viewer.lookat = (-0.5, -0.5, 0.0)
+    cfg.viewer.resolution = (960, 540)
+elif args.video:
     cfg.scene.env_spacing = 4.0
     cfg.viewer.origin_type = "asset_root"
     cfg.viewer.asset_name = "robot"
     cfg.viewer.eye = (1.6, -1.6, 0.8)
-    cfg.viewer.lookat = (0.0, 0.0, 0.0)
+    cfg.viewer.lookat = (-0.5, -0.5, 0.0)
     cfg.viewer.resolution = (640, 400)
 
 agent = load_cfg_from_registry(task, "rsl_rl_cfg_entry_point")
@@ -167,7 +193,7 @@ if not args.video:
         print(f"[eval] {args.variant:10s} {s:13s} fall={out[s]['fall_rate']:.3f} vel_err={out[s]['vel_err']:.3f} "
               f"slip={out[s]['foot_slip_m_per_s']:.3f} dist={out[s]['distance_m']:.2f}")
     os.makedirs(os.path.join(ROOT, "results"), exist_ok=True)
-    suffix = ("" if args.terrain == "flat" else "_rough") + ("" if args.fault == "none" else f"_{args.fault}")
+    suffix = ("" if args.terrain == "flat" else f"_{args.terrain}") + ("" if args.fault == "none" else f"_{args.fault}")
     with open(os.path.join(ROOT, f"results/metrics_{args.variant}{suffix}.json"), "w") as f:
         json.dump({"checkpoint": os.path.relpath(ckpt, ROOT), "terrain": args.terrain, "fault": args.fault,
                    "per_env": per_env, "surfaces": out}, f, indent=1)
@@ -175,9 +201,10 @@ else:
     os.makedirs(os.path.join(ROOT, "media/videos"), exist_ok=True)
     for i, s in enumerate(surfaces):
         venv.reset()
-        uw.viewport_camera_controller.set_view_env_index(i)
+        if not args.wide:
+            uw.viewport_camera_controller.set_view_env_index(i)
         _, fr = rollout(int(args.video_seconds / dt), frames_env=i)
-        path = os.path.join(ROOT, f"media/videos/{args.variant}_{s}{'' if args.terrain == 'flat' else '_rough'}{'' if args.fault == 'none' else '_' + args.fault}.mp4")
+        path = os.path.join(ROOT, f"media/videos/{args.variant}_{s}{'' if args.terrain == 'flat' else '_' + args.terrain}{'_wide' if args.wide else ''}{'' if args.fault == 'none' else '_' + args.fault}.mp4")
         imageio.mimsave(path, fr, fps=int(round(1 / dt)))
         print("[eval] wrote", path)
 env.close()
